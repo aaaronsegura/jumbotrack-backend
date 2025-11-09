@@ -29,7 +29,6 @@ if COL_EAN not in df.columns or COL_PRODUCTO not in df.columns:
     exit()
 
 # Limpieza profunda de EAN y Nombres
-# Quitamos '.0', espacios, y convertimos vacíos a None
 df['ean_limpio'] = df[COL_EAN].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
 df['ean_limpio'] = df['ean_limpio'].replace({'nan': None, 'None': None, '<NA>': None, '': None})
 
@@ -43,12 +42,28 @@ print(f"  Datos limpios. Filas válidas: {len(df_final)}")
 print(f"  Guardando en '{ARCHIVO_DB}'...")
 try:
     conn = sqlite3.connect(ARCHIVO_DB)
+    cursor = conn.cursor()
+    
+    # --- Tabla Productos ---
     df_final.to_sql('productos', conn, if_exists='replace', index=False)
     
     # Índices para velocidad
-    cursor = conn.cursor()
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_ean ON productos (ean_limpio)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_nombre ON productos (producto_limpio)")
+    print("  Tabla 'productos' actualizada e indexada.")
+
+    # --- NUEVO: Tabla Usuarios ---
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS usuarios (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        nombre TEXT NOT NULL,
+        email TEXT UNIQUE NOT NULL,
+        password_hash TEXT NOT NULL
+    )
+    ''')
+    print("  Tabla 'usuarios' creada o ya existente.")
+    # --- FIN DE LO NUEVO ---
+
     conn.commit()
     conn.close()
     print("\n ¡MIGRACIÓN EXITOSA! ")
