@@ -2,8 +2,8 @@ import sqlite3
 import os
 from flask import Flask, jsonify, request, g
 from flask_cors import CORS
-# --- NUEVO IMPORT ---
-from werkzeug.security import generate_password_hash
+# --- IMPORTS DE SEGURIDAD ACTUALIZADOS ---
+from werkzeug.security import generate_password_hash, check_password_hash
 
 app = Flask(__name__)
 CORS(app)
@@ -33,7 +33,7 @@ def get_alerts():
     print(" Petición de Alertas")
     return jsonify([{"id": "a1", "message": "Poco stock", "type": "LOW_STOCK", "timestamp": "2025-11-05T20:00:00Z"}])
 
-# --- RUTA ESCÁNER (JSON SIMPLIFICADO) ---
+# --- RUTA ESCÁNER ---
 @app.route("/api/products/ean/<string:ean>", methods=["GET"])
 def get_product_by_ean(ean):
     ean_buscado = ean.strip()
@@ -47,7 +47,6 @@ def get_product_by_ean(ean):
             "nombre": prod.get("producto_limpio", "Sin Nombre"),
             "ean": prod.get("ean_limpio", "N/A"),
             "precio": prod.get("Precio Venta", 0),
-            # Ajusta el nombre de la columna de stock si es diferente en tu nuevo Excel
             "stock": prod.get("STOCK \n11-09-2025", 0) 
         }
         print(f" ENVIANDO: {response['nombre']}")
@@ -56,7 +55,7 @@ def get_product_by_ean(ean):
         print(" NO ENCONTRADO")
         return jsonify({"error": "Producto no encontrado"}), 404
 
-# --- RUTA BUSCADOR (JSON SIMPLIFICADO) ---
+# --- RUTA BUSCADOR ---
 @app.route("/api/products/search/<string:query>", methods=["GET"])
 def search_products(query):
     texto = query.strip().upper()
@@ -75,13 +74,12 @@ def search_products(query):
             "nombre": prod.get("producto_limpio", "Sin Nombre"),
             "ean": prod.get("ean_limpio", "N/A"),
             "precio": prod.get("Precio Venta", 0),
-            # Ajusta el nombre de la columna de stock si es diferente en tu nuevo Excel
             "stock": prod.get("STOCK \n11-09-2025", 0)
         })
         
     return jsonify(lista_limpia)
 
-# --- NUEVA RUTA DE REGISTRO ---
+# --- RUTA DE REGISTRO ---
 @app.route('/api/auth/register', methods=['POST'])
 def register_user():
     data = request.get_json()
@@ -93,7 +91,6 @@ def register_user():
     email = data.get('email')
     password = data.get('password')
 
-    # Hashear la contraseña por seguridad
     password_hash = generate_password_hash(password)
 
     try:
@@ -115,14 +112,60 @@ def register_user():
                 "nombre": nombre,
                 "email": email
             }
-        }), 201 # 201 = "Created"
+        }), 201
 
     except sqlite3.IntegrityError:
-        # Esto pasa si el email ya existe (debido al UNIQUE)
-        return jsonify({"error": "El email ya está registrado"}), 409 # 409 = "Conflict"
+        return jsonify({"error": "El email ya está registrado"}), 409
     except Exception as e:
         return jsonify({"error": f"Error en el servidor: {str(e)}"}), 500
-# --- FIN DE RUTA DE REGISTRO ---
+
+# --- NUEVA RUTA DE LOGIN ---
+@app.route('/api/auth/login', methods=['POST'])
+def login_user():
+    data = request.get_json()
+
+    if not data or not data.get('email') or not data.get('password'):
+        return jsonify({"error": "Faltan datos (email, password)"}), 400
+
+    email = data.get('email')
+    password = data.get('password')
+
+    try:
+        db = get_db()
+        cursor = db.cursor()
+
+        # 1. Buscar al usuario por email
+        cursor.execute("SELECT * FROM usuarios WHERE email = ?", (email,))
+        usuario_encontrado = cursor.fetchone()
+
+        if usuario_encontrado is None:
+            # Email no encontrado
+            return jsonify({"error": "Credenciales inválidas"}), 401 # 401 = Unauthorized
+
+        # 2. Convertir la fila de la DB a un diccionario
+        usuario = dict(usuario_encontrado)
+
+        # 3. Verificar la contraseña hasheada
+        if not check_password_hash(usuario['password_hash'], password):
+            # Contraseña incorrecta
+            return jsonify({"error": "Credenciales inválidas"}), 401
+
+        # 4. ¡Login exitoso!
+        # (Más adelante aquí generaremos un TOKEN)
+        
+        return jsonify({
+            "mensaje": "Login exitoso",
+            "usuario": {
+                "id": usuario['id'],
+                "nombre": usuario['nombre'],
+                "email": usuario['email']
+            }
+            # "token": "aqui_va_el_token_jwt"  <-- Próximo paso
+        }), 200
+
+    except Exception as e:
+        return jsonify({"error": f"Error en el servidor: {str(e)}"}), 500
+# --- FIN DE RUTA DE LOGIN ---
 
 if __name__ == "__main__":
     print(f" Servidor listo en http://0.0.0.0:3000")
