@@ -70,7 +70,7 @@ def get_user(current_user):
     # Ya no devolvemos datos fijos, sino los datos del usuario del token
     return jsonify({
         "id": current_user['id'],
-        "nombre": current_user['nombre'],
+        "name": current_user['nombre'],
         "email": current_user['email']
     })
 
@@ -206,4 +206,5 @@ def login_user():
 if __name__ == "__main__":
     print(f" Servidor listo en http://0.0.0.0:3000")
     app.run(host="0.0.0.0", port=3000, debug=True)
+
 
