@@ -5,66 +5,72 @@ import os
 # --- Configuración ---
 ARCHIVO_EXCEL = "productos.xls"
 ARCHIVO_DB = "productos.db"
-HOJA = "Hoja1"
+HOJA = "Hoja2"  # <--- ¡CAMBIO IMPORTANTE! Antes decía "Hoja1"
 
-print(f"🚀 Iniciando migración de '{ARCHIVO_EXCEL}' a '{ARCHIVO_DB}'...")
+print(f"🚀 Iniciando migración de '{ARCHIVO_EXCEL}' (Hoja: {HOJA}) a '{ARCHIVO_DB}'...")
 
 try:
-    # Leemos el Excel como texto (dtype=str) para evitar errores de formato
+    # Leemos el Excel como texto
     df = pd.read_excel(ARCHIVO_EXCEL, sheet_name=HOJA, dtype=str)
     print(f"✅ Excel leído. Filas encontradas: {len(df)}")
 except Exception as e:
     print(f"❌ ERROR al leer Excel: {e}")
+    # Intenta listar las hojas disponibles para ayudar a depurar
+    try:
+        xl = pd.ExcelFile(ARCHIVO_EXCEL)
+        print(f"   Hojas disponibles en el archivo: {xl.sheet_names}")
+    except:
+        pass
     exit()
 
 print("🧹 Limpiando datos...")
 df.columns = df.columns.str.strip()
 
-# --- MAPEO DE COLUMNAS (Excel -> Base de Datos) ---
-# Ajusta los nombres de la izquierda si tu Excel cambia
+# --- MAPEO DE COLUMNAS ---
 column_mapping = {
-    'Sección': 'seccion',           # Usaremos esto como "Pasillo" o Ubicación
+    'Sección': 'seccion',
     'SAP': 'sap',
     'Código Barra Principal': 'ean',
     'nombre_producto': 'nombre',
-    'STOCK \n11-09-2025': 'stock',  # Asegúrate que este nombre sea EXACTO al del Excel
+    'STOCK \n11-09-2025': 'stock',
     'Unidad de Medida Base (UMB)': 'umb',
     'Precio Venta': 'precio',
-    'Imagen': 'imagen_url'
+    'Imagen': 'imagen_url' # Esta columna solo existe en la Hoja2
 }
 
-# Verificar que las columnas existan
+# Verificar columnas
+missing_cols = []
 for col_excel in column_mapping.keys():
     if col_excel not in df.columns:
-        print(f"⚠️ ADVERTENCIA: No encuentro la columna '{col_excel}' en el Excel.")
-        # Podríamos crear la columna vacía para que no falle
-        df[col_excel] = None
+        missing_cols.append(col_excel)
 
-# Renombramos las columnas del DataFrame a las de la DB
+if missing_cols:
+    print(f"⚠️ ADVERTENCIA CRÍTICA: No encuentro estas columnas en '{HOJA}': {missing_cols}")
+    print(f"   Columnas encontradas: {list(df.columns)}")
+else:
+    print("✅ Todas las columnas encontradas, incluyendo 'Imagen'.")
+
+# Renombrar y filtrar
+# (Si alguna columna falta, esto fallaría, así que aseguramos que existan aunque sea vacías)
+for col in missing_cols:
+    df[col] = ""
+
 df = df.rename(columns=column_mapping)
+df_final = df[list(column_mapping.values())].copy()
 
-# Seleccionamos solo las columnas que nos interesan
-columnas_finales = list(column_mapping.values())
-df_final = df[columnas_finales].copy()
-
-# Limpieza específica
+# Limpieza
 df_final['ean'] = df_final['ean'].str.replace(r'\.0$', '', regex=True).str.strip()
 df_final['sap'] = df_final['sap'].str.replace(r'\.0$', '', regex=True).str.strip()
-
-# Rellenar vacíos
 df_final = df_final.fillna('')
 
-print(f"📦 Datos listos para guardar. Filas válidas: {len(df_final)}")
+print(f"📦 Datos procesados: {len(df_final)} productos.")
 
 try:
     conn = sqlite3.connect(ARCHIVO_DB)
     cursor = conn.cursor()
     
-    # 1. Tabla PRODUCTOS (Desde Excel)
-    # Borramos y recreamos para asegurar la estructura nueva
+    # Reiniciar tabla productos
     cursor.execute("DROP TABLE IF EXISTS productos")
-    
-    # Creamos la tabla con la estructura nueva
     cursor.execute('''
         CREATE TABLE productos (
             ean TEXT PRIMARY KEY,
@@ -79,22 +85,19 @@ try:
         )
     ''')
     
-    # Insertamos los datos
-    # Nota: 'condicion_alimentaria' la dejamos pendiente o la calculamos si tienes reglas
-    for _, row in df_final.iterrows():
-        cursor.execute('''
-            INSERT INTO productos (ean, sap, nombre, seccion, stock, umb, precio, imagen_url)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (row['ean'], row['sap'], row['nombre'], row['seccion'], row['stock'], row['umb'], row['precio'], row['imagen_url']))
+    # Insertar datos
+    data_to_insert = list(df_final.itertuples(index=False, name=None))
+    cursor.executemany('''
+        INSERT INTO productos (seccion, sap, ean, nombre, stock, umb, precio, imagen_url)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ''', data_to_insert)
 
-    # Índices para búsqueda rápida
+    # Índices
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_ean ON productos (ean)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sap ON productos (sap)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_nombre ON productos (nombre)")
     
-    print("✅ Tabla 'productos' actualizada con IMÁGENES y SAP.")
-
-    # 2. Tabla USUARIOS (Se mantiene igual, pero aseguramos que exista)
+    # Tablas adicionales (Usuarios y Vencimientos)
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS usuarios (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -103,9 +106,7 @@ try:
         password_hash TEXT NOT NULL
     )
     ''')
-    print("✅ Tabla 'usuarios' verificada.")
-
-    # 3. NUEVA TABLA: VENCIMIENTOS (Para las alertas manuales)
+    
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS vencimientos (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -116,11 +117,10 @@ try:
         creado_en TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
     ''')
-    print("✅ Tabla 'vencimientos' (Sistema de Alertas) lista.")
 
     conn.commit()
     conn.close()
-    print("\n🎉 ¡MIGRACIÓN EXITOSA! La base de datos está lista.")
+    print("\n🎉 ¡MIGRACIÓN EXITOSA! Base de datos actualizada con Hoja 2.")
 
 except Exception as e:
-    print(f"❌ ERROR CRÍTICO en la base de datos: {e}")
+    print(f"❌ ERROR SQL: {e}")
