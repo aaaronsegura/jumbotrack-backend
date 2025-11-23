@@ -61,6 +61,7 @@ try:
 
         log(f"📄 Leyendo hoja: {hoja_correcta}")
         
+        # Leemos todo como string para evitar problemas de formato
         df = pd.read_excel(ARCHIVO_EXCEL, sheet_name=hoja_correcta, dtype=str)
         df.columns = df.columns.str.strip()
         
@@ -80,9 +81,16 @@ try:
         df_final = df[list(mapa.values())].copy()
         df_final = df_final.fillna('')
         
-        # Limpiar IDs
-        df_final['ean'] = df_final['ean'].str.replace(r'\.0$', '', regex=True)
-        df_final['sap'] = df_final['sap'].str.replace(r'\.0$', '', regex=True)
+        # --- LIMPIEZA PROFUNDA (EL ARREGLO) ---
+        # 1. Limpiar URLs de imágenes (quita espacios al inicio y final)
+        if 'imagen_url' in df_final.columns:
+            df_final['imagen_url'] = df_final['imagen_url'].astype(str).str.strip()
+            
+        # 2. Limpiar IDs y Códigos (quita .0 y espacios)
+        df_final['ean'] = df_final['ean'].str.replace(r'\.0$', '', regex=True).str.strip()
+        df_final['sap'] = df_final['sap'].str.replace(r'\.0$', '', regex=True).str.strip()
+        df_final['nombre'] = df_final['nombre'].str.strip()
+        # --------------------------------------
 
         # Insertar
         data = list(df_final.itertuples(index=False, name=None))
