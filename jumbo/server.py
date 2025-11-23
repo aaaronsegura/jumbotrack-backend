@@ -115,10 +115,16 @@ def login():
                 'exp': datetime.utcnow() + timedelta(days=30)
             }, app.config['SECRET_KEY'], algorithm="HS256")
             
+            # --- CORRECCIÓN APLICADA AQUÍ ---
+            # Se envía el 'id' para cumplir con el modelo estricto de Android
             return jsonify({
                 "mensaje": "Login exitoso", 
                 "token": token, 
-                "usuario": {"nombre": user['nombre'], "email": user['email']}
+                "usuario": {
+                    "id": user['id'],  # <--- ESTO ES LO QUE FALTABA
+                    "nombre": user['nombre'], 
+                    "email": user['email']
+                }
             })
             
         return jsonify({"error": "Credenciales inválidas"}), 401
@@ -136,6 +142,7 @@ def me(current_user):
     }), 200
 
 # --- RUTAS DE PRODUCTOS ---
+
 @app.route("/api/products/search/<string:query>", methods=["GET"])
 @token_required
 def search(current_user, query):
@@ -165,6 +172,7 @@ def ean(current_user, codigo):
         return jsonify({"error": str(e)}), 500
 
 # --- RUTAS DE ALERTAS (15 DÍAS) ---
+
 @app.route("/api/alerts", methods=['GET'])
 @token_required
 def get_alerts(current_user):
