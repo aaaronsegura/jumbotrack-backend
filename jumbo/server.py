@@ -1,6 +1,6 @@
 import sqlite3
 import os
-import datetime
+from datetime import datetime, timedelta # Necesario para calcular fechas
 from flask import Flask, jsonify, request, g
 from flask_cors import CORS
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -8,19 +8,25 @@ import jwt
 from functools import wraps
 from dotenv import load_dotenv 
 
+# Cargar variables de entorno
 load_dotenv() 
 
 app = Flask(__name__)
 CORS(app)
 DATABASE = 'productos.db'
 
-app.config['SECRET_KEY'] = os.environ.get('FLASK_SECRET_KEY', 'un-secreto-simple')
+# Configuración de la llave secreta
+app.config['SECRET_KEY'] = os.environ.get('FLASK_SECRET_KEY', 'un-secreto-simple-para-pruebas')
 
-# --- DB HELPER ---
+# ==========================================
+# CONEXIÓN A BASE DE DATOS
+# ==========================================
+
 def get_db():
     db = getattr(g, '_database', None)
     if db is None:
         db = g._database = sqlite3.connect(DATABASE)
+        # Esto permite acceder a las columnas por nombre (ej: row['nombre'])
         db.row_factory = sqlite3.Row 
     return db
 
@@ -30,25 +36,35 @@ def close_connection(exception):
     if db is not None:
         db.close()
 
-# --- DECORADOR DE SEGURIDAD ---
+# ==========================================
+# SEGURIDAD (TOKEN JWT)
+# ==========================================
+
 def token_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
         token = None
+        # La app envía el token en el header 'x-access-token'
         if 'x-access-token' in request.headers:
             token = request.headers['x-access-token']
+
         if not token:
             return jsonify({'error': 'Token no encontrado'}), 401
+
         try:
+            # Decodificar el token
             data = jwt.decode(token, app.config['SECRET_KEY'], algorithms=["HS256"])
             current_user = data
+        except jwt.ExpiredSignatureError:
+            return jsonify({'error': 'El token ha expirado'}), 401
         except:
-            return jsonify({'error': 'Token inválido o expirado'}), 401
+            return jsonify({'error': 'Token inválido'}), 401
+
         return f(current_user, *args, **kwargs)
     return decorated
 
 # ==========================================
-# RUTAS DE PRODUCTOS (ACTUALIZADAS)
+# RUTAS DE PRODUCTOS (BUSCADOR Y ESCÁNER)
 # ==========================================
 
 @app.route("/api/products/ean/<string:codigo>", methods=["GET"])
@@ -56,22 +72,21 @@ def token_required(f):
 def get_product_by_ean(current_user, codigo):
     codigo = codigo.strip()
     print(f"🔎 Buscando EAN/SAP: '{codigo}'")
-    cur = get_db().cursor()
     
-    # Buscamos por EAN o por SAP
+    cur = get_db().cursor()
+    # Busca por EAN o por SAP
     cur.execute("SELECT * FROM productos WHERE ean = ? OR sap = ?", (codigo, codigo))
     row = cur.fetchone()
     
     if row:
         prod = dict(row)
-        # Construimos la respuesta con los NUEVOS campos del Excel
         response = {
             "nombre": prod.get("nombre", "Sin Nombre"),
             "ean": prod.get("ean", "N/A"),
             "sap": prod.get("sap", "N/A"),
             "precio": prod.get("precio", "0"),
             "stock": prod.get("stock", "0"),
-            "ubicacion": prod.get("seccion", "General"), # Mapeamos 'Sección' a 'Ubicación/Pasillo'
+            "ubicacion": prod.get("seccion", "General"),
             "umb": prod.get("umb", "UN"),
             "imagen_url": prod.get("imagen_url", ""), # URL de la imagen
             "condicion": prod.get("condicion_alimentaria", "Normal")
@@ -87,7 +102,6 @@ def search_products(current_user, query):
     if not texto: return jsonify([])
     
     cur = get_db().cursor()
-    
     # Búsqueda inteligente: Por Nombre O por SAP
     cur.execute("""
         SELECT * FROM productos 
@@ -97,6 +111,7 @@ def search_products(current_user, query):
     
     rows = cur.fetchall()
     lista_limpia = []
+    
     for row in rows:
         prod = dict(row)
         lista_limpia.append({
@@ -107,22 +122,21 @@ def search_products(current_user, query):
             "stock": prod.get("stock", "0"),
             "ubicacion": prod.get("seccion", "General"),
             "umb": prod.get("umb", "UN"),
-            "imagen_url": prod.get("imagen_url", ""), # Enviamos la imagen al buscador
+            "imagen_url": prod.get("imagen_url", ""),
             "condicion": prod.get("condicion_alimentaria", "Normal")
         })
         
     return jsonify(lista_limpia)
 
 # ==========================================
-# NUEVO SISTEMA DE ALERTAS (MANUAL)
+# SISTEMA DE ALERTAS (Lógica de 15 días)
 # ==========================================
 
-# 1. Guardar un vencimiento (POST)
+# 1. Guardar Alerta (Recibe fecha y la guarda tal cual)
 @app.route("/api/alerts", methods=['POST'])
 @token_required
 def add_alert(current_user):
     data = request.get_json()
-    # Esperamos: { "ean": "...", "nombre": "...", "fecha": "YYYY-MM-DD" }
     
     if not data or not data.get('fecha'):
         return jsonify({"error": "Falta la fecha de vencimiento"}), 400
@@ -136,7 +150,7 @@ def add_alert(current_user):
         """, (
             data.get('ean', 'S/C'), 
             data.get('nombre', 'Producto Manual'), 
-            data.get('fecha'), 
+            data.get('fecha'),      # Guardamos YYYY-MM-DD
             current_user['email']
         ))
         db.commit()
@@ -144,29 +158,59 @@ def add_alert(current_user):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# 2. Leer vencimientos (GET)
+# 2. Obtener Alertas (Calcula los días restantes)
 @app.route("/api/alerts", methods=['GET'])
 @token_required
 def get_alerts(current_user):
-    # Devuelve la lista de productos que vencen pronto (o todos)
     cur = get_db().cursor()
-    # Ordenamos por fecha para ver lo más próximo a vencer primero
+    # Ordenar por fecha para ver lo más urgente primero
     cur.execute("SELECT * FROM vencimientos ORDER BY fecha_vencimiento ASC")
     rows = cur.fetchall()
     
-    alertas = []
+    alertas_procesadas = []
+    hoy = datetime.now().date()
+
     for row in rows:
-        alertas.append({
+        # Calcular días restantes
+        try:
+            fecha_venc = datetime.strptime(row['fecha_vencimiento'], '%Y-%m-%d').date()
+            dias_restantes = (fecha_venc - hoy).days
+        except ValueError:
+            dias_restantes = 999 # Error en fecha, mandamos al final
+
+        # Determinar estado para la App
+        estado = "ok"
+        mensaje = ""
+
+        if dias_restantes < 0:
+            estado = "vencido"
+            mensaje = f"Venció hace {abs(dias_restantes)} días"
+        elif dias_restantes == 0:
+            estado = "alerta"
+            mensaje = "¡Vence HOY!"
+        elif dias_restantes <= 15:
+            # ¡AQUÍ ESTÁ LA LÓGICA! Si faltan 15 días o menos -> ALERTA
+            estado = "alerta"
+            mensaje = f"Vence en {dias_restantes} días"
+        else:
+            estado = "ok"
+            mensaje = f"Faltan {dias_restantes} días"
+
+        alertas_procesadas.append({
             "id": row['id'],
             "ean": row['ean'],
             "nombre": row['nombre_producto'],
             "fecha": row['fecha_vencimiento'],
-            "usuario": row['usuario_email']
+            "usuario": row['usuario_email'],
+            "dias_restantes": dias_restantes,
+            "estado": estado,                 # 'ok', 'alerta', 'vencido'
+            "mensaje_estado": mensaje
         })
-    return jsonify(alertas)
+        
+    return jsonify(alertas_procesadas)
 
 # ==========================================
-# RUTAS DE USUARIO (REGISTRO/LOGIN) - SIN CAMBIOS
+# AUTH (Usuarios)
 # ==========================================
 
 @app.route('/api/auth/register', methods=['POST'])
@@ -174,9 +218,6 @@ def register_user():
     data = request.get_json()
     if not data or not data.get('email') or not data.get('password'):
         return jsonify({"error": "Faltan datos"}), 400
-    # ... (lógica de registro igual que antes) ...
-    # Resumida para no hacer el código gigante, usa la que ya tenías o copia del mensaje anterior
-    # Solo asegúrate de incluir el insert a la tabla usuarios
     try:
         password_hash = generate_password_hash(data.get('password'))
         db = get_db()
@@ -193,18 +234,18 @@ def login_user():
     data = request.get_json()
     email = data.get('email')
     password = data.get('password')
-    
     db = get_db()
     cursor = db.cursor()
     cursor.execute("SELECT * FROM usuarios WHERE email = ?", (email,))
     user = cursor.fetchone()
 
     if user and check_password_hash(user['password_hash'], password):
+        # Token dura 30 días
         token = jwt.encode({
             'id': user['id'],
             'nombre': user['nombre'],
             'email': user['email'],
-            'exp': datetime.datetime.utcnow() + datetime.timedelta(days=30)
+            'exp': datetime.utcnow() + timedelta(days=30)
         }, app.config['SECRET_KEY'], algorithm="HS256")
         
         return jsonify({
@@ -212,7 +253,6 @@ def login_user():
             "token": token,
             "usuario": {"nombre": user['nombre'], "email": user['email']}
         })
-    
     return jsonify({"error": "Credenciales inválidas"}), 401
 
 @app.route("/api/users/me", methods=["GET"])
@@ -226,5 +266,6 @@ def get_user(current_user):
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 3000))
+    print(f"🚀 Servidor listo en http://0.0.0.0:{port}")
     app.run(host="0.0.0.0", port=port, debug=True)
-    # Actualización forzada para imágenes y alertas
+    # v7: Version final con alertas de 15 dias
