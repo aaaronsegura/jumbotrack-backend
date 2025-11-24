@@ -115,13 +115,11 @@ def login():
                 'exp': datetime.utcnow() + timedelta(days=30)
             }, app.config['SECRET_KEY'], algorithm="HS256")
             
-            # --- CORRECCIÓN APLICADA AQUÍ ---
-            # Se envía el 'id' para cumplir con el modelo estricto de Android
             return jsonify({
                 "mensaje": "Login exitoso", 
                 "token": token, 
                 "usuario": {
-                    "id": user['id'],  # <--- ESTO ES LO QUE FALTABA
+                    "id": user['id'], 
                     "nombre": user['nombre'], 
                     "email": user['email']
                 }
@@ -211,22 +209,54 @@ def get_alerts(current_user):
         logger.error(f"Error alertas: {e}")
         return jsonify({"error": str(e)}), 500
 
+# --- LÓGICA MEJORADA DE ALERTAS (ACTUALIZAR EN VEZ DE DUPLICAR) ---
 @app.route("/api/alerts", methods=['POST'])
 @token_required
 def add_alert(current_user):
     data = request.get_json()
-    if not data.get('fecha'): return jsonify({"error": "Falta fecha"}), 400
+    
+    fecha = data.get('fecha')
+    ean = data.get('ean')
+    nombre = data.get('nombre', 'Manual')
+    
+    if not fecha: 
+        return jsonify({"error": "Falta fecha"}), 400
+
     try:
         db = get_db()
-        db.cursor().execute("INSERT INTO vencimientos (ean, nombre_producto, fecha_vencimiento, usuario_email) VALUES (?, ?, ?, ?)", 
-                           (data.get('ean', 'S/C'), data.get('nombre', 'Manual'), data.get('fecha'), current_user['email']))
+        cur = db.cursor()
+        
+        # 1. ¿Ya existe una alerta para este EAN?
+        cur.execute("SELECT id FROM vencimientos WHERE ean = ?", (ean,))
+        existing_alert = cur.fetchone()
+        
+        if existing_alert and ean != "S/C" and ean != "":
+            # A. ACTUALIZAR (UPSERT)
+            cur.execute('''
+                UPDATE vencimientos 
+                SET fecha_vencimiento = ?, nombre_producto = ?, usuario_email = ?
+                WHERE id = ?
+            ''', (fecha, nombre, current_user['email'], existing_alert['id']))
+            mensaje_final = "Alerta actualizada correctamente"
+            code = 200
+        else:
+            # B. CREAR NUEVA
+            cur.execute('''
+                INSERT INTO vencimientos (ean, nombre_producto, fecha_vencimiento, usuario_email) 
+                VALUES (?, ?, ?, ?)
+            ''', (ean, nombre, fecha, current_user['email']))
+            mensaje_final = "Alerta creada exitosamente"
+            code = 201
+
         db.commit()
-        return jsonify({"mensaje": "Guardado"}), 201
+        return jsonify({"mensaje": mensaje_final}), code
+        
     except Exception as e:
+        logger.error(f"Error guardando alerta: {e}")
         return jsonify({"error": str(e)}), 500
 
 # --- INICIO ---
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 3000))
-    logger.info(f"🚀 Servidor V12 FINAL iniciando en puerto {port}")
+    logger.info(f"🚀 Servidor V13 (Con Upsert) iniciando en puerto {port}")
     app.run(host="0.0.0.0", port=port)
